@@ -7,6 +7,11 @@ from openai import AzureOpenAI
 import pandas as pd
 import json
 import re
+import logging
+
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 # Load environment variables
 load_dotenv()
@@ -30,7 +35,7 @@ AZURE_DEPLOYMENT_MODEL = os.getenv("AZURE_DEPLOYMENT_MODEL")
 
 # PostgreSQL settings
 POSTGRES_CONN = {
-    "host": "localhost",
+    "host": "postgres",
     "port": "5432",
     "dbname": "postgres",
     "user": "postgres",
@@ -58,6 +63,7 @@ def call_azure_openai(messages):
         )    
         return response.choices[0].message.content.strip()
     except Exception as e:
+        logger.error(f"Error calling Azure OpenAI: {e}")
         st.error(f"Error calling Azure OpenAI: {e}")
         return None
 
@@ -118,6 +124,75 @@ def generate_sample_csv(table_name):
         df = pd.DataFrame()
     return df.to_csv(index=False)
 
+def initialize_graph():
+    try:
+        conn = psycopg2.connect(**POSTGRES_CONN)
+        conn.autocommit = True
+        cur = conn.cursor()
+        cur.execute("CREATE EXTENSION IF NOT EXISTS age;")
+        cur.execute("LOAD 'age';")
+        cur.execute("SET search_path = ag_catalog, \"$user\", public;")
+        cur.execute("SELECT * FROM ag_catalog.ag_graph WHERE name = %s;", (GRAPH_NAME,))
+        if not cur.fetchone():
+            cur.execute("SELECT ag_catalog.create_graph(%s);", (GRAPH_NAME,))
+            logger.info(f"Created graph: {GRAPH_NAME}")
+            st.info(f"Created graph: {GRAPH_NAME}")
+        return True
+    except Exception as e:
+        logger.error(f"Error initializing graph: {e}")
+        st.error(f"Error initializing graph: {e}")
+        return False
+    finally:
+        if 'cur' in locals(): cur.close()
+        if 'conn' in locals(): conn.close()
+
+def check_node_label(label):
+    try:
+        conn = psycopg2.connect(**POSTGRES_CONN)
+        conn.autocommit = True
+        cur = conn.cursor()
+        cur.execute("SET search_path = ag_catalog, \"$user\", public;")
+        query = f"MATCH (n:{label}) RETURN n LIMIT 1"
+        cur.execute(f"SELECT * FROM cypher('{GRAPH_NAME}', $${query}$$) as (n agtype);")
+        return bool(cur.fetchone())
+    except Exception as e:
+        logger.warning(f"Error checking node label {label}: {e}")
+        st.warning(f"Error checking node label {label}: {e}")
+        return False
+    finally:
+        if 'cur' in locals(): cur.close()
+        if 'conn' in locals(): conn.close()
+
+def create_node_label(label):
+    try:
+        conn = psycopg2.connect(**POSTGRES_CONN)
+        conn.autocommit = True
+        cur = conn.cursor()
+        cur.execute("SET search_path = ag_catalog, \"$user\", public;")
+        # Create a dummy node to initialize the label
+        if label == "Customer":
+            cypher = "CREATE (:Customer {id: -1, name: 'DUMMY', address: '', postalcode: '', city: '', country: ''})"
+        elif label == "EFTCOCode":
+            cypher = "CREATE (:EFTCOCode {id: -1, code: 'DUMMY', agent: '', guideline: ''})"
+        elif label == "Fleetserie":
+            cypher = "CREATE (:Fleetserie {id: -1, number: 'DUMMY', manufacturer: '', material: '', insulation: false, insulation_type: ''})"
+        elif label == "Product":
+            cypher = "CREATE (:Product {id: -1, name: 'DUMMY', manufacturer: '', common_name: '', pH: 0.0, solubility: 0.0, viscosity: 0.0})"
+        elif label == "TankContainer":
+            cypher = "CREATE (:TankContainer {id: -1, number: 'DUMMY', fleetserie: '', operator: '', type: '', manlid_holes: 0, capacity_l: 0, baffles: false, coating: '', prev1: '', prev2: '', prev3: ''})"
+        else:
+            return False
+        cur.execute(f"SELECT * FROM cypher('{GRAPH_NAME}', $${cypher}$$) as (result agtype);")
+        logger.info(f"Created node label: {label}")
+        return True
+    except Exception as e:
+        logger.error(f"Error creating node label {label}: {e}")
+        st.error(f"Error creating node label {label}: {e}")
+        return False
+    finally:
+        if 'cur' in locals(): cur.close()
+        if 'conn' in locals(): conn.close()
+
 def delete_existing_data(table_name):
     try:
         conn = psycopg2.connect(**POSTGRES_CONN)
@@ -137,6 +212,7 @@ def delete_existing_data(table_name):
         cur.execute(f"SELECT * FROM cypher('{GRAPH_NAME}', $${cypher}$$) as (result agtype);")
         return True
     except Exception as e:
+        logger.error(f"Error deleting existing data for {table_name}: {e}")
         st.error(f"Error deleting existing data for {table_name}: {e}")
         return False
     finally:
@@ -145,9 +221,36 @@ def delete_existing_data(table_name):
 
 def import_csv_to_graph(table_name, uploaded_file):
     try:
-        if not delete_existing_data(table_name):
-            st.error(f"Failed to delete existing {table_name} data")
+        if not initialize_graph():
+            logger.error("Failed to initialize graph")
+            st.error("Failed to initialize graph")
             return
+        node_labels = {
+            "Customers": "Customer",
+            "EFTCO_Codes": "EFTCOCode",
+            "Fleetserie": "Fleetserie",
+            "Products": "Product",
+            "TankContainers": "TankContainer"
+        }
+        if table_name not in node_labels:
+            logger.error(f"Invalid table name: {table_name}")
+            st.error(f"Invalid table name: {table_name}")
+            return
+        label = node_labels[table_name]
+        # Check and create node label if it doesn't exist
+        if not check_node_label(label):
+            if not create_node_label(label):
+                logger.error(f"Failed to create node label {label}")
+                st.error(f"Failed to create node label {label}")
+                return
+            logger.info(f"Initialized node label {label}")
+            st.info(f"Initialized node label {label}")
+        else:
+            # Delete existing data if label exists
+            if not delete_existing_data(table_name):
+                logger.error(f"Failed to delete existing {table_name} data")
+                st.error(f"Failed to delete existing {table_name} data")
+                return
         df = pd.read_csv(uploaded_file, encoding='ISO-8859-1', keep_default_na=False)
         conn = psycopg2.connect(**POSTGRES_CONN)
         conn.autocommit = True
@@ -156,80 +259,140 @@ def import_csv_to_graph(table_name, uploaded_file):
         cypher_statements = []
         if table_name == "Customers":
             for _, row in df.iterrows():
-                cypher_statements.append(
-                    f"CREATE (:Customer {{id: {row['ID']}, name: '{row['Customer'].replace("'", "''")}', "
-                    f"address: '{row['Address'].replace("'", "''")}', postalcode: '{row['Postalcode']}', "
-                    f"city: '{row['City'].replace("'", "''")}', country: '{row['Country'].replace("'", "''")}'}})"
+                customer_name = row['Customer'].replace("'", "''")
+                address = row['Address'].replace("'", "''")
+                city = row['City'].replace("'", "''")
+                country = row['Country'].replace("'", "''")
+                cypher = (
+                    f"CREATE (:Customer {{id: {row['ID']}, "
+                    f"name: '{customer_name}', "
+                    f"address: '{address}', "
+                    f"postalcode: '{row['Postalcode']}', "
+                    f"city: '{city}', "
+                    f"country: '{country}'}})"
                 )
+                cypher_statements.append(cypher)
         elif table_name == "EFTCO_Codes":
             for _, row in df.iterrows():
                 code = str(row.get('Code', '')).replace("'", "''")
                 id_value = int(row.get('ID', 0))
                 agent = str(row.get('Cleaning agent', '')).replace("'", "''")
                 guideline = str(row.get('Guideline', '')).replace("'", "''")
-                cypher_statements.append(
-                    f"CREATE (:EFTCOCode {{id: {id_value}, code: '{code}', agent: '{agent}', guideline: '{guideline}'}})"
+                cypher = (
+                    f"CREATE (:EFTCOCode {{id: {id_value}, "
+                    f"code: '{code}', "
+                    f"agent: '{agent}', "
+                    f"guideline: '{guideline}'}})"
                 )
+                cypher_statements.append(cypher)
         elif table_name == "Fleetserie":
             for _, row in df.iterrows():
                 insulation_type = str(row['Insulation type']).replace("'", "''") if row['Insulation type'] else ''
-                cypher_statements.append(
-                    f"CREATE (:Fleetserie {{id: {row['FleetserieID']}, number: '{row['Fleetserie number']}', "
-                    f"manufacturer: '{str(row['Manufacturer']).replace("'", "''")}', "
-                    f"material: '{str(row['Inner tank material']).replace("'", "''")}', "
+                manufacturer = str(row['Manufacturer']).replace("'", "''")
+                material = str(row['Inner tank material']).replace("'", "''")
+                cypher = (
+                    f"CREATE (:Fleetserie {{id: {row['FleetserieID']}, "
+                    f"number: '{row['Fleetserie number']}', "
+                    f"manufacturer: '{manufacturer}', "
+                    f"material: '{material}', "
                     f"insulation: {str(row['Insulation']).lower()}, "
                     f"insulation_type: '{insulation_type}'}})"
                 )
+                cypher_statements.append(cypher)
         elif table_name == "Products":
             for _, row in df.iterrows():
-                cypher_statements.append(
-                    f"CREATE (:Product {{id: {row['ID']}, name: '{row['Product'].replace("'", "''")}', "
-                    f"manufacturer: '{row['Manufacturer'].replace("'", "''")}', "
-                    f"common_name: '{row['Common name'].replace("'", "''")}', "
-                    f"pH: {row['PH value']}, solubility: {row['Water solutability']}, "
+                product_name = row['Product'].replace("'", "''")
+                manufacturer = row['Manufacturer'].replace("'", "''")
+                common_name = row['Common name'].replace("'", "''")
+                cypher = (
+                    f"CREATE (:Product {{id: {row['ID']}, "
+                    f"name: '{product_name}', "
+                    f"manufacturer: '{manufacturer}', "
+                    f"common_name: '{common_name}', "
+                    f"pH: {row['PH value']}, "
+                    f"solubility: {row['Water solutability']}, "
                     f"viscosity: {row['Viscosity (mPas.s)']}}})"
                 )
+                cypher_statements.append(cypher)
         elif table_name == "TankContainers":
+            # Ensure dependent labels (Product, Fleetserie) exist
+            if not check_node_label("Product"):
+                if not create_node_label("Product"):
+                    logger.error("Failed to create Product node label")
+                    st.error("Failed to create Product node label")
+                    return
+                logger.info("Initialized Product node label")
+                st.info("Initialized Product node label")
+            if not check_node_label("Fleetserie"):
+                if not create_node_label("Fleetserie"):
+                    logger.error("Failed to create Fleetserie node label")
+                    st.error("Failed to create Fleetserie node label")
+                    return
+                logger.info("Initialized Fleetserie node label")
+                st.info("Initialized Fleetserie node label")
             for _, row in df.iterrows():
                 coating = str(row['Coating']).replace("'", "''") if row['Coating'] else 'None'
-                cypher_statements.append(
-                    f"CREATE (:TankContainer {{id: {row['TankID']}, number: '{row['Tank number']}', "
-                    f"fleetserie: '{row['Fleetserie number']}', operator: '{row['Operator'].replace("'", "''")}', "
-                    f"type: '{row['Type']}', manlid_holes: {row['Manlid holes']}, "
-                    f"capacity_l: {row['Capacity (L)']}, baffles: {str(row['Baffles']).lower()}, "
-                    f"coating: '{coating}', prev1: '{row['Previous Product 1'].replace("'", "''")}', "
-                    f"prev2: '{row['Previous Product 2'].replace("'", "''")}', "
-                    f"prev3: '{row['Previous Product 3'].replace("'", "''")}'}})"
+                operator = row['Operator'].replace("'", "''")
+                prev1 = row['Previous Product 1'].replace("'", "''")
+                prev2 = row['Previous Product 2'].replace("'", "''")
+                prev3 = row['Previous Product 3'].replace("'", "''")
+                cypher = (
+                    f"CREATE (:TankContainer {{id: {row['TankID']}, "
+                    f"number: '{row['Tank number']}', "
+                    f"fleetserie: '{row['Fleetserie number']}', "
+                    f"operator: '{operator}', "
+                    f"type: '{row['Type']}', "
+                    f"manlid_holes: {row['Manlid holes']}, "
+                    f"capacity_l: {row['Capacity (L)']}, "
+                    f"baffles: {str(row['Baffles']).lower()}, "
+                    f"coating: '{coating}', "
+                    f"prev1: '{prev1}', "
+                    f"prev2: '{prev2}', "
+                    f"prev3: '{prev3}'}})"
                 )
+                cypher_statements.append(cypher)
                 for idx, prev_field in enumerate(['Previous Product 1', 'Previous Product 2', 'Previous Product 3'], 1):
                     product_name = str(row[prev_field]).replace("'", "''")
                     product_exists = False
                     try:
                         product_df = pd.read_csv(generate_sample_csv("Products"), encoding='ISO-8859-1')
                         product_exists = product_name in product_df['Product'].values or product_name in product_df['Common name'].values
-                    except:
-                        pass
+                    except Exception as e:
+                        logger.warning(f"Error checking product existence: {e}")
                     if product_name and product_exists:
-                        cypher_statements.append(
+                        cypher = (
                             f"MATCH (t:TankContainer {{number: '{row['Tank number']}'}}), "
                             f"(p:Product) WHERE p.name = '{product_name}' OR p.common_name = '{product_name}' "
                             f"CREATE (t)-[:HAS_PREVIOUS_PRODUCT {{sequence: {idx}}}]->(p)"
                         )
+                        cypher_statements.append(cypher)
                 fleetserie_number = str(row['Fleetserie number'])
                 if fleetserie_number:
-                    cypher_statements.append(
+                    cypher = (
                         f"MATCH (t:TankContainer {{number: '{row['Tank number']}'}}), "
                         f"(f:Fleetserie {{number: '{fleetserie_number}'}}) "
                         f"CREATE (t)-[:PART_OF]->(f)"
                     )
+                    cypher_statements.append(cypher)
+        # Delete dummy nodes
+        for label in node_labels.values():
+            cypher = f"MATCH (n:{label} {{id: -1}}) DETACH DELETE n"
+            try:
+                cur.execute(f"SELECT * FROM cypher('{GRAPH_NAME}', $${cypher}$$) as (result agtype);")
+            except Exception as e:
+                logger.warning(f"Error deleting dummy node for {label}: {e}")
+        # Execute import statements
         for stmt in cypher_statements:
             try:
                 cur.execute(f"SELECT * FROM cypher('{GRAPH_NAME}', $${stmt}$$) as (result agtype);")
             except Exception as e:
+                logger.error(f"Error executing statement: {stmt}\nError: {e}")
                 st.error(f"Error executing statement: {stmt}\nError: {e}")
                 continue
+        logger.info(f"Data imported successfully into {table_name}")
         st.success(f"Data imported successfully into {table_name}")
     except Exception as e:
+        logger.error(f"Error importing data for {table_name}: {e}")
         st.error(f"Error importing data for {table_name}: {e}")
     finally:
         if 'cur' in locals(): cur.close()
@@ -243,6 +406,53 @@ def validate_cypher_query(cypher_query: str) -> bool:
     query_upper = cypher_query.upper()
     return any(term in query_upper for term in allowed_terms) or "MATCH" in query_upper
 
+def show_graph_status(cypher_query: str):
+    try:
+        # Clean up the query - remove markdown code blocks and any extra whitespace
+        cypher_query = cypher_query.replace("```cypher", "").replace("```", "").strip()
+        
+        # Remove all line breaks and extra spaces to ensure single-line query
+        cypher_query = ' '.join(cypher_query.split())
+        
+        # Replace any problematic characters in the query
+        cypher_query = cypher_query.replace("'", "''")  # Escape single quotes
+        
+        conn = psycopg2.connect(**POSTGRES_CONN)
+        conn.autocommit = True
+        cur = conn.cursor()
+        
+        # Verify AGE extension is loaded
+        cur.execute("CREATE EXTENSION IF NOT EXISTS age;")
+        cur.execute("LOAD 'age';")
+        cur.execute("SET search_path = ag_catalog, \"$user\", public;")
+        
+        # Format the query properly for AGE - ensure it's a single line
+        formatted_query = f"SELECT * FROM cypher('{GRAPH_NAME}', $${cypher_query}$$) as (result agtype);"
+        
+        # Debug output
+        st.write("Final query being executed:")
+        st.code(formatted_query, language="sql")
+        
+        cur.execute(formatted_query)
+        rows = cur.fetchall()
+        
+        # Convert agtype results to Python objects
+        processed_results = []
+        for row in rows:
+            if isinstance(row[0], dict):
+                processed_results.append(row[0])
+            else:
+                processed_results.append(str(row[0]))
+        
+        return processed_results
+    except Exception as e:
+        st.error(f"Error executing Cypher query: {str(e)}")
+        st.error("Please check the query syntax and try again.")
+        return []
+    finally:
+        if 'cur' in locals(): cur.close()
+        if 'conn' in locals(): conn.close()
+
 def run_cypher_query(cypher_query: str):
     try:
         cypher_query = cypher_query.strip()
@@ -250,7 +460,6 @@ def run_cypher_query(cypher_query: str):
         cypher_query = ' '.join(cypher_query.split())
         cypher_query = cypher_query.rstrip(';')
         cypher_query = re.sub(r"''([^']*)''", r"'\1'", cypher_query)
-        # Strip AS aliases from RETURN clause
         return_clause = cypher_query[cypher_query.upper().find('RETURN')+6:].strip()
         clean_return = re.sub(r'\s+AS\s+\w+', '', return_clause)
         columns = [col.strip().split('.')[-1] for col in clean_return.split(',')]
@@ -262,6 +471,7 @@ def run_cypher_query(cypher_query: str):
         cur.execute("LOAD 'age';")
         cur.execute("SET search_path = ag_catalog, \"$user\", public;")
         formatted_query = f"SELECT * FROM cypher('{GRAPH_NAME}', $${cypher_query}$$) as ({column_def});"
+        logger.info(f"Executing Cypher query: {cypher_query}")
         st.write("Executing Cypher query:")
         st.code(cypher_query, language="cypher")
         cur.execute(formatted_query)
@@ -281,9 +491,9 @@ def run_cypher_query(cypher_query: str):
             processed_results.append(result_dict)
         return processed_results
     except Exception as e:
+        logger.warning(f"Error executing Cypher query: {str(e)}")
         st.warning(f"Error executing Cypher query: {str(e)}")
         st.code(cypher_query, language="cypher")
-        # Try fallback query without AS aliases
         clean_query = re.sub(r'\s+AS\s+\w+', '', cypher_query)
         try:
             conn = psycopg2.connect(**POSTGRES_CONN)
@@ -311,6 +521,7 @@ def run_cypher_query(cypher_query: str):
                 processed_results.append(result_dict)
             return processed_results
         except Exception as e2:
+            logger.error(f"Fallback query failed: {str(e2)}")
             st.error(f"Fallback query failed: {str(e2)}")
             return []
         finally:
@@ -373,6 +584,7 @@ def process_user_query(user_question):
             continue
         if not validate_cypher_query(cypher_query):
             attempts += 1
+            logger.warning(f"Invalid query, attempt {attempts}/{MAX_ATTEMPTS}: {cypher_query}")
             st.warning(f"Invalid query, attempt {attempts}/{MAX_ATTEMPTS}: {cypher_query}")
             continue
         result = run_cypher_query(cypher_query)
@@ -452,20 +664,8 @@ with st.sidebar:
 with st.expander("Show Graph Status"):
     if st.button("Check Graph Contents"):
         with st.spinner("Checking graph..."):
-            test_result = run_cypher_query("MATCH (n) RETURN n LIMIT 10")
-            st.info(f"Nodes in graph (sample of 10): {len(test_result)}")
-            if test_result:
-                st.json(test_result)
-    if st.button("Check Fleetserie Nodes"):
-        with st.spinner("Checking Fleetserie nodes..."):
-            test_result = run_cypher_query("MATCH (f:Fleetserie) RETURN f.id, f.number, f.manufacturer")
-            st.info(f"Fleetserie nodes in graph: {len(test_result)}")
-            if test_result:
-                st.json(test_result)
-    if st.button("Check PART_OF Relationships"):
-        with st.spinner("Checking PART_OF relationships..."):
-            test_result = run_cypher_query("MATCH (t:TankContainer)-[:PART_OF]->(f:Fleetserie) RETURN t.number, f.number LIMIT 10")
-            st.info(f"PART_OF relationships in graph (sample of 10): {len(test_result)}")
+            test_result = show_graph_status("MATCH (n) RETURN n LIMIT 1000")
+            st.info(f"Nodes in graph: {len(test_result)}")
             if test_result:
                 st.json(test_result)
 
