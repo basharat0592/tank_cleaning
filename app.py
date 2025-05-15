@@ -172,7 +172,8 @@ def import_csv_to_graph(table_name, uploaded_file):
             st.error(f"Failed to delete existing {table_name} data")
             return
 
-        df = pd.read_csv(uploaded_file)
+        #df = pd.read_csv(uploaded_file)
+        df = pd.read_csv(uploaded_file, encoding='ISO-8859-1')
         conn = psycopg2.connect(**POSTGRES_CONN)
         conn.autocommit = True
         cur = conn.cursor()
@@ -187,8 +188,14 @@ def import_csv_to_graph(table_name, uploaded_file):
                 )
         elif table_name == "EFTCO_Codes":
             for _, row in df.iterrows():
+                # Safely convert to string and replace single quotes for Cypher
+                code = str(row.get('Code', '')).strip()
+                id_value = int(row.get('ID', 0))
+                agent = str(row.get('Cleaning agent', '')).replace("'", "''").strip()
+                guideline = str(row.get('Guideline', '')).replace("'", "''").strip()
+
                 cypher_statements.append(
-                    f"CREATE (:EFTCOCode {{code: '{row['Code']}', id: {row['ID']}, agent: '{row['Cleaning agent'].replace("'", "''")}', guideline: '{row['Guideline'].replace("'", "''")}'}})"
+                    f"CREATE (:EFTCOCode {{code: '{code}', id: {id_value}, agent: '{agent}', guideline: '{guideline}'}})"
                 )
         elif table_name == "Fleetserie":
             for _, row in df.iterrows():
