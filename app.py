@@ -86,14 +86,13 @@ def generate_sample_csv(table_name):
             {"Code": "C01", "ID": 2, "Cleaning agent": "Alkaline detergent", "Guideline": "Detergent with pH >7 used during the cleaning procedure..."}
         ])
     elif table_name == "Fleetserie":
-        df = pd.DataFrame([{
-            "Fleetserie number": 54004,
-            "FleetserieID": 4,
-            "Manufacturer": "UBH",
-            "Inner tank material": "Stainless steel",
-            "Insulation": False,
-            "Insulation type": ""
-        }])
+        df = pd.DataFrame([
+            {"Fleetserie number": 54001, "FleetserieID": 1, "Manufacturer": "Singamas", "Inner tank material": "Composite", "Insulation": False, "Insulation type": ""},
+            {"Fleetserie number": 54002, "FleetserieID": 2, "Manufacturer": "CIMC", "Inner tank material": "Stainless steel", "Insulation": True, "Insulation type": "Glass wool"},
+            {"Fleetserie number": 54003, "FleetserieID": 3, "Manufacturer": "Singamas", "Inner tank material": "Stainless steel", "Insulation": True, "Insulation type": "Glass wool"},
+            {"Fleetserie number": 54004, "FleetserieID": 4, "Manufacturer": "UBH", "Inner tank material": "Stainless steel", "Insulation": False, "Insulation type": ""},
+            {"Fleetserie number": 54005, "FleetserieID": 5, "Manufacturer": "Singamas", "Inner tank material": "Stainless steel", "Insulation": True, "Insulation type": "Glass wool"}
+        ])
     elif table_name == "Products":
         df = pd.DataFrame([
             {"Product": "Water", "ID": 1, "Manufacturer": "Universal Solvents Inc.", "Common name": "Water", "PH value": 7.0, "Water solutability": 0.0035, "Viscosity (mPas.s)": 0.89},
@@ -202,6 +201,7 @@ def import_csv_to_graph(table_name, uploaded_file):
                     f"prev2: '{row['Previous Product 2'].replace("'", "''")}', "
                     f"prev3: '{row['Previous Product 3'].replace("'", "''")}'}})"
                 )
+                # Create HAS_PREVIOUS_PRODUCT relationships
                 for idx, prev_field in enumerate(['Previous Product 1', 'Previous Product 2', 'Previous Product 3'], 1):
                     product_name = str(row[prev_field]).replace("'", "''")
                     product_exists = False
@@ -216,16 +216,12 @@ def import_csv_to_graph(table_name, uploaded_file):
                             f"(p:Product) WHERE p.name = '{product_name}' OR p.common_name = '{product_name}' "
                             f"CREATE (t)-[:HAS_PREVIOUS_PRODUCT {{sequence: {idx}}}]->(p)"
                         )
-                fleetserie_exists = False
-                try:
-                    fleetserie_df = pd.read_csv(generate_sample_csv("Fleetserie"), encoding='ISO-8859-1')
-                    fleetserie_exists = str(row['Fleetserie number']) in fleetserie_df['Fleetserie number'].astype(str).values
-                except:
-                    pass
-                if fleetserie_exists:
+                # Create PART_OF relationship using imported Fleetserie data
+                fleetserie_number = str(row['Fleetserie number'])
+                if fleetserie_number:
                     cypher_statements.append(
                         f"MATCH (t:TankContainer {{number: '{row['Tank number']}'}}), "
-                        f"(f:Fleetserie {{number: '{row['Fleetserie number']}'}}) "
+                        f"(f:Fleetserie {{number: '{fleetserie_number}'}}) "
                         f"CREATE (t)-[:PART_OF]->(f)"
                     )
         for stmt in cypher_statements:
@@ -262,7 +258,6 @@ def run_cypher_query(cypher_query: str):
         cur.execute("CREATE EXTENSION IF NOT EXISTS age;")
         cur.execute("LOAD 'age';")
         cur.execute("SET search_path = ag_catalog, \"$user\", public;")
-        # Define column aliases to match RETURN clause
         return_clause = cypher_query[cypher_query.upper().find('RETURN')+6:].strip()
         columns = [col.strip().split('.')[-1] for col in return_clause.split(',')]
         column_def = ', '.join(f"{col} agtype" for col in columns)
@@ -315,13 +310,14 @@ SCHEMA:
   - Product names should match against both 'name' and 'common_name' fields.
   - BELONGS_TO relationships may not exist in the graph.
   - Not all previous products (e.g., Specflex) are in the Product table, so rely on prev1, prev2, prev3 for such cases.
-  - For customer list queries, return all properties (id, name, address, postalcode, city, country).
+  - For fleet series queries, use PART_OF relationships but also consider TankContainer.fleetserie for robustness.
+  - For fleet series queries, return essential fields (id, number, operator, capacity_l).
 
 RULES:
 1. Use only the nodes and relationships defined in the schema.
 2. Return a single, valid Cypher query as plain text (no markdown, no ```cypher``` blocks, no semicolons).
-3. Always include a RETURN clause with specific fields (e.g., c.id, c.name for Customer).
-4. Use single quotes for string literals (e.g., 'Ethanol').
+3. Always include a RETURN clause with specific fields (e.g., t.id, t.number for TankContainer).
+4. Use single quotes for string literals (e.g., '54004').
 5. Ensure the query is syntactically correct for Apache AGE.
 6. For previous product queries, use prev1, prev2, prev3 fields unless HAS_PREVIOUS_PRODUCT is explicitly needed.
 7. Handle cases where relationships may be missing by focusing on available data.
@@ -369,6 +365,10 @@ def process_user_query(user_question):
                     fallback_cypher = f"MATCH (t:TankContainer) WHERE t.prev1 = '{product}' OR t.prev2 = '{product}' OR t.prev3 = '{product}' RETURN t.id, t.number, t.operator"
             elif "customer" in user_question.lower() and "list" in user_question.lower():
                 fallback_cypher = f"MATCH (c:Customer) RETURN c.id, c.name, c.address, c.postalcode, c.city, c.country"
+            elif "fleet series" in user_question.lower():
+                fleetserie_number = re.search(r'fleet series\s+(\d+)', user_question, re.IGNORECASE)
+                if fleetserie_number:
+                    fallback_cypher = f"MATCH (t:TankContainer) WHERE t.fleetserie = '{fleetserie_number.group(1)}' RETURN t.id, t.number, t.operator, t.capacity_l"
             if fallback_cypher:
                 result = run_cypher_query(fallback_cypher)
                 response = call_azure_openai([{
@@ -423,11 +423,23 @@ with st.expander("Show Graph Status"):
             st.info(f"Nodes in graph (sample of 10): {len(test_result)}")
             if test_result:
                 st.json(test_result)
+    if st.button("Check Fleetserie Nodes"):
+        with st.spinner("Checking Fleetserie nodes..."):
+            test_result = run_cypher_query("MATCH (f:Fleetserie) RETURN f.id, f.number, f.manufacturer")
+            st.info(f"Fleetserie nodes in graph: {len(test_result)}")
+            if test_result:
+                st.json(test_result)
+    if st.button("Check PART_OF Relationships"):
+        with st.spinner("Checking PART_OF relationships..."):
+            test_result = run_cypher_query("MATCH (t:TankContainer)-[:PART_OF]->(f:Fleetserie) RETURN t.number, f.number LIMIT 10")
+            st.info(f"PART_OF relationships in graph (sample of 10): {len(test_result)}")
+            if test_result:
+                st.json(test_result)
 
 # Query interface
 st.header("Ask a Question")
 user_question = st.text_input("Enter your question about tank cleaning:", 
-                             placeholder="e.g., Give me list of customer")
+                             placeholder="e.g., Which tanks belong to fleet series 54004?")
 if user_question:
     with st.spinner("Processing your question..."):
         cypher, result, answer = process_user_query(user_question)
