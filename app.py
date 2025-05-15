@@ -201,7 +201,6 @@ def import_csv_to_graph(table_name, uploaded_file):
                     f"prev2: '{row['Previous Product 2'].replace("'", "''")}', "
                     f"prev3: '{row['Previous Product 3'].replace("'", "''")}'}})"
                 )
-                # Create HAS_PREVIOUS_PRODUCT relationships
                 for idx, prev_field in enumerate(['Previous Product 1', 'Previous Product 2', 'Previous Product 3'], 1):
                     product_name = str(row[prev_field]).replace("'", "''")
                     product_exists = False
@@ -216,7 +215,6 @@ def import_csv_to_graph(table_name, uploaded_file):
                             f"(p:Product) WHERE p.name = '{product_name}' OR p.common_name = '{product_name}' "
                             f"CREATE (t)-[:HAS_PREVIOUS_PRODUCT {{sequence: {idx}}}]->(p)"
                         )
-                # Create PART_OF relationship using imported Fleetserie data
                 fleetserie_number = str(row['Fleetserie number'])
                 if fleetserie_number:
                     cypher_statements.append(
@@ -252,15 +250,17 @@ def run_cypher_query(cypher_query: str):
         cypher_query = ' '.join(cypher_query.split())
         cypher_query = cypher_query.rstrip(';')
         cypher_query = re.sub(r"''([^']*)''", r"'\1'", cypher_query)
+        # Strip AS aliases from RETURN clause
+        return_clause = cypher_query[cypher_query.upper().find('RETURN')+6:].strip()
+        clean_return = re.sub(r'\s+AS\s+\w+', '', return_clause)
+        columns = [col.strip().split('.')[-1] for col in clean_return.split(',')]
+        column_def = ', '.join(f"{col} agtype" for col in columns)
         conn = psycopg2.connect(**POSTGRES_CONN)
         conn.autocommit = True
         cur = conn.cursor()
         cur.execute("CREATE EXTENSION IF NOT EXISTS age;")
         cur.execute("LOAD 'age';")
         cur.execute("SET search_path = ag_catalog, \"$user\", public;")
-        return_clause = cypher_query[cypher_query.upper().find('RETURN')+6:].strip()
-        columns = [col.strip().split('.')[-1] for col in return_clause.split(',')]
-        column_def = ', '.join(f"{col} agtype" for col in columns)
         formatted_query = f"SELECT * FROM cypher('{GRAPH_NAME}', $${cypher_query}$$) as ({column_def});"
         st.write("Executing Cypher query:")
         st.code(cypher_query, language="cypher")
@@ -281,9 +281,41 @@ def run_cypher_query(cypher_query: str):
             processed_results.append(result_dict)
         return processed_results
     except Exception as e:
-        st.error(f"Error executing Cypher query: {str(e)}")
+        st.warning(f"Error executing Cypher query: {str(e)}")
         st.code(cypher_query, language="cypher")
-        return []
+        # Try fallback query without AS aliases
+        clean_query = re.sub(r'\s+AS\s+\w+', '', cypher_query)
+        try:
+            conn = psycopg2.connect(**POSTGRES_CONN)
+            conn.autocommit = True
+            cur = conn.cursor()
+            cur.execute("SET search_path = ag_catalog, \"$user\", public;")
+            return_clause = clean_query[clean_query.upper().find('RETURN')+6:].strip()
+            columns = [col.strip().split('.')[-1] for col in return_clause.split(',')]
+            column_def = ', '.join(f"{col} agtype" for col in columns)
+            formatted_query = f"SELECT * FROM cypher('{GRAPH_NAME}', $${clean_query}$$) as ({column_def});"
+            cur.execute(formatted_query)
+            rows = cur.fetchall()
+            processed_results = []
+            for row in rows:
+                result_dict = {}
+                for idx, col in enumerate(columns):
+                    agtype_str = str(row[idx])
+                    try:
+                        if agtype_str.startswith('{') or agtype_str.startswith('['):
+                            result_dict[col] = json.loads(agtype_str)
+                        else:
+                            result_dict[col] = agtype_str
+                    except json.JSONDecodeError:
+                        result_dict[col] = agtype_str
+                processed_results.append(result_dict)
+            return processed_results
+        except Exception as e2:
+            st.error(f"Fallback query failed: {str(e2)}")
+            return []
+        finally:
+            if 'cur' in locals(): cur.close()
+            if 'conn' in locals(): conn.close()
     finally:
         if 'cur' in locals(): cur.close()
         if 'conn' in locals(): conn.close()
@@ -311,15 +343,16 @@ SCHEMA:
   - BELONGS_TO relationships may not exist in the graph.
   - Not all previous products (e.g., Specflex) are in the Product table, so rely on prev1, prev2, prev3 for such cases.
   - For fleet series queries, use PART_OF relationships but also consider TankContainer.fleetserie for robustness.
-  - For fleet series queries, return essential fields (id, number, operator, capacity_l).
+  - For previous product queries, return prev1, prev2, prev3 directly without AS aliases.
+  - For all queries, avoid using AS aliases in the RETURN clause to ensure compatibility with Apache AGE.
 
 RULES:
 1. Use only the nodes and relationships defined in the schema.
 2. Return a single, valid Cypher query as plain text (no markdown, no ```cypher``` blocks, no semicolons).
-3. Always include a RETURN clause with specific fields (e.g., t.id, t.number for TankContainer).
-4. Use single quotes for string literals (e.g., '54004').
+3. Always include a RETURN clause with specific fields (e.g., t.prev1, t.prev2, t.prev3 for previous products).
+4. Use single quotes for string literals (e.g., 'HOYU 000001-3').
 5. Ensure the query is syntactically correct for Apache AGE.
-6. For previous product queries, use prev1, prev2, prev3 fields unless HAS_PREVIOUS_PRODUCT is explicitly needed.
+6. For previous product queries, use prev1, prev2, prev3 fields without AS aliases.
 7. Handle cases where relationships may be missing by focusing on available data.
 
 Question: "{question}"
@@ -346,7 +379,7 @@ def process_user_query(user_question):
         if result:
             response = call_azure_openai([{
                 "role": "user",
-                "content": f"Explain these tank cleaning results in simple terms: {json.dumps(result)}. The user asked: '{user_question}'. Keep the response concise and focused on the key findings."
+                "content": f"Explain these tank cleaning results in simple terms: {json.dumps(result)}. The user asked: '{user_question}'. Keep the response concise and focused on the key findings. For previous product queries, refer to the fields as Previous Product 1, Previous Product 2, and Previous Product 3 in the explanation."
             }])
         else:
             fallback_cypher = None
@@ -373,7 +406,7 @@ def process_user_query(user_question):
                 result = run_cypher_query(fallback_cypher)
                 response = call_azure_openai([{
                     "role": "user",
-                    "content": f"Explain these tank cleaning results in simple terms: {json.dumps(result)}. The user asked: '{user_question}'. Keep the response concise and focused on the key findings."
+                    "content": f"Explain these tank cleaning results in simple terms: {json.dumps(result)}. The user asked: '{user_question}'. Keep the response concise and focused on the key findings. For previous product queries, refer to the fields as Previous Product 1, Previous Product 2, and Previous Product 3 in the explanation."
                 }]) if result else f"No results found for '{user_question}'. The graph may lack relevant data. Try questions about previous products or tank properties."
             else:
                 response = f"No results found for '{user_question}'. The graph may lack relevant data. Try questions about previous products, fleet series, or cleaning codes."
@@ -439,7 +472,7 @@ with st.expander("Show Graph Status"):
 # Query interface
 st.header("Ask a Question")
 user_question = st.text_input("Enter your question about tank cleaning:", 
-                             placeholder="e.g., Which tanks belong to fleet series 54004?")
+                             placeholder="e.g., What are the previous products in tank HOYU 000001-3?")
 if user_question:
     with st.spinner("Processing your question..."):
         cypher, result, answer = process_user_query(user_question)
