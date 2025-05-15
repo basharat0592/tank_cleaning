@@ -193,7 +193,11 @@ def import_csv_to_graph(table_name, uploaded_file):
         elif table_name == "Fleetserie":
             for _, row in df.iterrows():
                 cypher_statements.append(
-                    f"CREATE (:Fleetserie {{id: {row['FleetserieID']}, number: '{row['Fleetserie number']}', manufacturer: '{row['Manufacturer'].replace("'", "''")}', material: '{row['Inner tank material'].replace("'", "''")}', insulation: {str(row['Insulation']).lower()}, insulation_type: '{row['Insulation type'].replace("'", "''")}'}})"
+                    f"CREATE (:Fleetserie {{id: {row['FleetserieID']}, number: '{str(row['Fleetserie number'])}', "
+                    f"manufacturer: '{str(row['Manufacturer']).replace("'", "''")}', "
+                    f"material: '{str(row['Inner tank material']).replace("'", "''")}', "
+                    f"insulation: {str(row['Insulation']).lower()}, "
+                    f"insulation_type: '{str(row['Insulation type']).replace("'", "''")}'}})"
                 )
         elif table_name == "Products":
             for _, row in df.iterrows():
