@@ -471,9 +471,9 @@ def run_cypher_query(cypher_query: str):
         cur.execute("LOAD 'age';")
         cur.execute("SET search_path = ag_catalog, \"$user\", public;")
         formatted_query = f"SELECT * FROM cypher('{GRAPH_NAME}', $${cypher_query}$$) as ({column_def});"
-        logger.info(f"Executing Cypher query: {cypher_query}")
-        st.write("Executing Cypher query:")
-        st.code(cypher_query, language="cypher")
+        #logger.info(f"Executing Cypher query: {cypher_query}")
+        #st.write("Executing Cypher query:")
+        #st.code(cypher_query, language="cypher")
         cur.execute(formatted_query)
         rows = cur.fetchall()
         processed_results = []
@@ -642,7 +642,6 @@ with st.sidebar:
     - Which tanks have capacity over 20000 liters?
     - Which tanks previously contained Methanol?
     - What cleaning agents are available for tank cleaning?
-    - Which tanks belong to fleet series 54004?
     """)
     st.header("📥 Import Data from CSV")
     table_select = st.selectbox("Select Table to Import", 
@@ -677,14 +676,14 @@ if user_question:
     with st.spinner("Processing your question..."):
         cypher, result, answer = process_user_query(user_question)
         if cypher:
-            st.subheader("Generated Cypher Query")
-            st.code(cypher, language="cypher")
-            st.subheader("Query Results")
-            if result:
-                st.json(result)
-            else:
-                st.warning("No results returned from the query")
-            st.subheader("Explanation")
+            # st.subheader("Generated Cypher Query")
+            # st.code(cypher, language="cypher")
+            # st.subheader("Query Results")
+            # if result:
+            #     st.json(result)
+            # else:
+            #     st.warning("No results returned from the query")
+            st.subheader("Response")
             st.write(answer)
         else:
             st.error("Failed to generate a valid query. Please try a different question.")
