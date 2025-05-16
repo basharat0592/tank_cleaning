@@ -660,13 +660,13 @@ with st.sidebar:
         )
 
 # Verify data
-with st.expander("Show Graph Status"):
-    if st.button("Check Graph Contents"):
-        with st.spinner("Checking graph..."):
-            test_result = show_graph_status("MATCH (n) RETURN n LIMIT 1000")
-            st.info(f"Nodes in graph: {len(test_result)}")
-            if test_result:
-                st.json(test_result)
+# with st.expander("Show Graph Status"):
+#     if st.button("Check Graph Contents"):
+#         with st.spinner("Checking graph..."):
+#             test_result = show_graph_status("MATCH (n) RETURN n LIMIT 1000")
+#             st.info(f"Nodes in graph: {len(test_result)}")
+#             if test_result:
+#                 st.json(test_result)
 
 # Query interface
 st.header("Ask a Question")
