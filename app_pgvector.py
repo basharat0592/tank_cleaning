@@ -688,10 +688,14 @@ def process_user_query(user_question):
             # Generate a human-readable response
             if doc_results:
                 response = "Here are the contents of the documents:\n"
+                source_info = "Source of Information:\n- Structured: Documents table\n- Details:\n"
+                file_type = st.session_state.file_type.lower() if 'file_type' in st.session_state else "unknown"
                 for doc in doc_results:
                     response += f"- Document ID {doc['id']} (Source: {doc['source']}, Created: {doc['created_at']}):\n  {doc['content']}\n"
+                    source_info += f"  - Document ID {doc['id']}: Originally from {file_type.upper()} file ('{doc['source']}')\n"
+                response += "\n" + source_info
             else:
-                response = "No documents found in the database."
+                response = "No documents found in the database.\n\nSource of Information: No data retrieved from documents table."
             return None, doc_results, response
         except Exception as e:
             logger.error(f"Error fetching document contents: {e}")
@@ -729,6 +733,21 @@ def process_user_query(user_question):
             """
         }])
         if response:
+            # Add source of information
+            source_info = "Source of Information:\n"
+            if result:
+                # Extract node labels from the Cypher query
+                node_labels = re.findall(r'\((\w+):(\w+)', cypher_query)
+                node_types = {label for _, label in node_labels}
+                source_info += f"- Structured: Graph database (Nodes: {', '.join(node_types)})\n"
+            if doc_results:
+                file_type = st.session_state.file_type.lower() if 'file_type' in st.session_state else "unknown"
+                source_info += "- Structured: Documents table (via semantic search)\n- Details:\n"
+                for doc in doc_results:
+                    source_info += f"  - Document ID {doc['id']}: Originally from {file_type.upper()} file ('{doc['source']}')\n"
+            if not result and not doc_results:
+                source_info += "- No data retrieved from graph or documents table."
+            response += "\n\n" + source_info
             return cypher_query, result, response
         attempts += 1
 
@@ -772,8 +791,22 @@ def process_user_query(user_question):
             If no documents were found, note that no relevant documents were available.
             """
         }]) if result or doc_results else f"No results found for '{user_question}'. No relevant documents or graph data available."
+        # Add source of information for fallback
+        source_info = "Source of Information:\n"
+        if result:
+            node_labels = re.findall(r'\((\w+):(\w+)', fallback_cypher)
+            node_types = {label for _, label in node_labels}
+            source_info += f"- Structured: Graph database (Nodes: {', '.join(node_types)})\n"
+        if doc_results:
+            file_type = st.session_state.file_type.lower() if 'file_type' in st.session_state else "unknown"
+            source_info += "- Structured: Documents table (via semantic search)\n- Details:\n"
+            for doc in doc_results:
+                source_info += f"  - Document ID {doc['id']}: Originally from {file_type.upper()} file ('{doc['source']}')\n"
+        if not result and not doc_results:
+            source_info += "- No data retrieved from graph or documents table."
+        response += "\n\n" + source_info
         return fallback_cypher, result, response
-    return None, None, f"No results found for '{user_question}'. No relevant documents or graph data available."
+    return None, None, f"No results found for '{user_question}'. No relevant documents or graph data available.\n\nSource of Information: No data retrieved from graph or documents table."
 
 # Streamlit UI
 st.title("🛢️ Tank Cleaning Graph Analyzer (Staging)")
